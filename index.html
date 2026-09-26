@@ -93,6 +93,10 @@
   #sentPreview { width: min(320px, 80vw); height: auto; }
   .ph-room { text-align: center; font-size: 18px; }
   .ph-status { text-align: center; font-size: 18px; min-height: 1.4em; }
+  .pet-menu { position: fixed; z-index: 46; background: #fff; border-radius: 18px; padding: 10px; display: flex; flex-direction: column; gap: 8px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.3); min-width: 240px; }
+  .pet-menu .btn { min-height: 52px; font-size: 20px; text-align: left; box-shadow: none; background: #ffe3e3; }
+  .pet-title { font-weight: 800; font-size: 18px; padding: 2px 6px; opacity: .7; }
   .life-note { font-size: 16px; font-weight: 600; opacity: .7; text-align: center; max-width: 1100px; }
   .tip { position: fixed; z-index: 45; background: #fffbe8; color: var(--ink); border-radius: 18px; padding: 12px 16px;
     font-size: 19px; font-weight: 800; line-height: 1.3; box-shadow: 0 8px 24px rgba(0,0,0,.25); pointer-events: none;
@@ -287,6 +291,20 @@
 </section>
 
 <div id="tip" class="tip hidden" role="status"><span id="tipText"></span></div>
+<div id="rejectPanel" class="overlay hidden">
+  <div class="panel phone">
+    <div class="ph-title" id="rejTitle"></div>
+    <div class="ph-note" id="rejText"></div>
+    <button id="rejRetake" class="btn big b-cam"></button>
+    <button id="rejDraw" class="btn big b-draw"></button>
+    <button id="rejClose" class="btn big b-soft" style="background:#eef3ff">Закрыть</button>
+  </div>
+</div>
+<div id="petMenu" class="pet-menu hidden" role="menu">
+  <div id="petMenuTitle" class="pet-title"></div>
+  <button id="petLeave" class="btn" role="menuitem">👋 Попросить уйти с поляны</button>
+  <button id="petCancel" class="btn b-soft" role="menuitem" style="background:#eef3ff">Отмена</button>
+</div>
 <div id="phonePanel" class="overlay hidden">
   <div class="panel phone">
     <div id="phoneBody"></div>
@@ -877,19 +895,47 @@ function silMasks(key) {
       Такую текстуру легко отправить с телефона на поляну: это обычная картинка JPEG.
    2) finishCreature: сырая текстура → вырезание фона → живой зверёк. Делает тот экран,
       где зверёк будет гулять (компьютер с поляной или сам телефон). */
+/* ---- Проверка качества фото ----
+   Пускаем на поляну только НАШИ раскраски, снятые достаточно хорошо:
+   1) на фото нашлись все 4 чёрных квадрата (иначе лист не выпрямить);
+   2) чёрный контур на фото совпадает с контуром шаблона. Считаем, какая доля линий шаблона
+      на фото действительно тёмная — с допуском ≈1,3 мм (лист бывает чуть изогнут).
+      Калибровка: хорошие фото (в т. ч. размытые) — 0,8–0,95; сдвиг рисунка на 4 мм, чужой
+      рисунок или пустой лист с каракулями — ниже 0,4. Порог — 0,55.
+   3) вокруг зверька нет густых тёмных каракулей: доля тёмных пикселей вне силуэта ≤ 8 %
+      (у хороших фото — 0 %, у листа, исчёрканного маркером, — 17–27 %). Карандашный фон не мешает.
+   Если не прошло — зверёк не создаётся, а ребёнку предлагают переснять или раскрасить на экране. */
+const MATCH_MIN = 0.55, MESS_MAX = 0.08;
+function outsideDark(raw, key) {
+  const d = ctx2d(raw).getImageData(0, 0, TEX.w, TEX.h).data, N = TEX.w * TEX.h;
+  const around = morph(ANIMALS[key].sil, TEX.w, TEX.h, 14, true);    // силуэт с запасом ≈3 мм
+  let n = 0, dk = 0;
+  for (let i = 0; i < N; i += 2) if (!around[i]) { n++; if ((d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) < 330) dk++; }
+  return n ? dk / n : 0;
+}
+function outlineMatch(raw, key) {
+  const d = ctx2d(raw).getImageData(0, 0, TEX.w, TEX.h).data, N = TEX.w * TEX.h;
+  const dark = new Uint8Array(N);
+  for (let i = 0; i < N; i++) dark[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) < 330 ? 1 : 0;
+  const near = morph(dark, TEX.w, TEX.h, 6, true);               // «рядом с тёмным» — допуск ≈1,3 мм
+  const line = ANIMALS[key].dark;
+  let on = 0, hit = 0;
+  for (let i = 0; i < N; i += 2) if (line[i]) { on++; if (near[i]) hit++; }
+  return on ? hit / on : 0;
+}
 function photoToItem(src, R, key) {
   const pts = findMarkers(src, R);
-  const precise = !!pts;
-  const H = precise
-    ? homography(MARK_CENTERS, pts)
-    : homography([[0, 0], [SHEET.w, 0], [0, SHEET.h], [SHEET.w, SHEET.h]],
-                 [[R.x, R.y], [R.x + R.w, R.y], [R.x, R.y + R.h], [R.x + R.w, R.y + R.h]]);
-  const raw = rectify(src, H);
+  if (!pts) return { ok: false, reason: 'markers' };
+  const raw = rectify(src, homography(MARK_CENTERS, pts));
   key = guessAnimal(raw, key);
-  whiteBalance(raw, precise ? silMasks(key).outer.map(v => 1 - v) : null);   // бумага = всё вне силуэта
-  return { raw, key, precise };
+  whiteBalance(raw, silMasks(key).outer.map(v => 1 - v));   // бумага = всё вне силуэта
+  const match = outlineMatch(raw, key);
+  if (match < MATCH_MIN) return { ok: false, reason: 'match', match };
+  const mess = outsideDark(raw, key);
+  if (mess > MESS_MAX) return { ok: false, reason: 'messy', match, mess };
+  return { raw, key, precise: true, ok: true, match };
 }
-function drawingToItem(raw, key) { return { raw, key, precise: true }; }
+function drawingToItem(raw, key) { return { raw, key, precise: true, ok: true }; }
 
 function finishCreature(item) {
   const tex = makeCanvas(TEX.w, TEX.h);
@@ -927,6 +973,20 @@ const Stage = {
     this.g = this.canvas.getContext('2d');
     window.addEventListener('resize', () => { if (this.running) this.resize(); });
     this.canvas.addEventListener('pointerdown', e => this.tap(e));
+    // правый клик / долгое нажатие по зверьку — меню учителя «Попросить уйти»
+    this.canvas.addEventListener('contextmenu', e => {
+      e.preventDefault();
+      const cr = this.hit(e.clientX, e.clientY);
+      if (cr) PetMenu.open(cr, e.clientX, e.clientY);
+    });
+    let lp = null;
+    this.canvas.addEventListener('pointerdown', e => {
+      if (e.pointerType === 'mouse') return;
+      const x = e.clientX, y = e.clientY;
+      lp = { x, y, t: setTimeout(() => { const cr = this.hit(x, y); if (cr) PetMenu.open(cr, x, y); }, 650) };
+    });
+    const cancel = e => { if (lp && (e.type !== 'pointermove' || Math.hypot(e.clientX - lp.x, e.clientY - lp.y) > 12)) { clearTimeout(lp.t); lp = null; } };
+    ['pointerup', 'pointercancel', 'pointermove'].forEach(n => this.canvas.addEventListener(n, cancel));
   },
 
   /* ---- Геометрия глубины ---- */
@@ -1344,19 +1404,31 @@ const Stage = {
   },
 
   /* ---- Касание: по зверьку — прыжок и голос; по траве — все бегут к пальцу ---- */
-  tap(e) {
-    Sound.unlock();
+  // Какой зверёк под точкой экрана (проверяем от ближних к дальним: ближний закрывает дальнего)
+  hit(clientX, clientY) {
     const r = this.canvas.getBoundingClientRect();
-    const px = e.clientX - r.left, py = e.clientY - r.top;
-    document.getElementById('stageHint').style.opacity = 0;
-    // проверяем от ближних к дальним: ближний зверёк закрывает дальнего
+    const px = clientX - r.left, py = clientY - r.top;
     const order = [...this.herd].sort((a, b) => b.z - a.z);
     for (const cr of order) {
+      if (cr.leaving) continue;
       const s = this.scaleOf(cr, cr.z), f = Math.abs(cr.flip) > 0.2 ? cr.flip : 1;
       const tx = (px - cr.x) / (f * s) + cr.a.anchor.x;
       const ty = (py - this.yOf(cr.z) - this.liftY(cr)) / s + cr.a.anchor.y;
       const b = cr.body, pad = 30;
-      if (tx > b.x - pad && tx < b.x + b.w + pad && ty > b.y - pad && ty < cr.a.anchor.y + pad) {
+      if (tx > b.x - pad && tx < b.x + b.w + pad && ty > b.y - pad && ty < cr.a.anchor.y + pad) return cr;
+    }
+    return null;
+  },
+
+  tap(e) {
+    if (e.button === 2) return;                                  // правая кнопка — это меню учителя
+    Sound.unlock();
+    const r = this.canvas.getBoundingClientRect();
+    const px = e.clientX - r.left, py = e.clientY - r.top;
+    document.getElementById('stageHint').style.opacity = 0;
+    {
+      const cr = this.hit(e.clientX, e.clientY);
+      if (cr) {
         cr.jumpT = 0; cr.excite = 2.5;
         if (cr.state === 'sit') { cr.state = 'idle'; cr.wait = 0.8; }
         this.voice(cr);
@@ -1593,11 +1665,9 @@ const Camera = {
 };
 
 // Поиск меток по расширенной области; запасной вариант — лист = рамка
+// Квадраты ищем с небольшим запасом вокруг рамки; без квадратов фото не принимаем
 function photoWithSearch(canvas, search, R) {
-  const pts = findMarkers(canvas, search);
-  if (pts) return photoToItem(canvas, search, App.animal);
-  toast('Квадраты не нашлись — оживляю по рамке 🙂');
-  return photoToItem(canvas, R, App.animal);
+  return photoToItem(canvas, search, App.animal);
 }
 
 // Загрузка готового фото (из галереи телефона или папки ноутбука)
@@ -1620,9 +1690,7 @@ function onFileChosen(e) {
     const { canvas } = toWorkCanvas(img, img.naturalWidth, img.naturalHeight);
     const R = { x: 0, y: 0, w: canvas.width, h: canvas.height };
     animate(() => {
-      const item = photoToItem(canvas, R, App.animal);
-      if (!item.precise) toast('Квадраты не нашлись — оживляю всё фото 🙂');
-      return item;
+      return photoToItem(canvas, R, App.animal);
     });
   };
   img.onerror = () => toast('Не получилось открыть картинку 😿');
@@ -2007,6 +2075,7 @@ const Relay = {
     let meta = {};
     try { meta = JSON.parse(m.message || '{}'); } catch (_) { return; }
     if (!ANIMALS[meta.k] || !/^https:\/\/ntfy\.sh\//.test(m.attachment.url)) return;   // чужие сообщения игнорируем
+    if (!meta.p || PetMenu.banned().includes('ntfy-' + m.id)) return;   // без меток или выгнан учителем — не пускаем
     try {
       await App.ready;
       const res = await fetch(m.attachment.url);
@@ -2118,7 +2187,8 @@ function openPhonePanel() {
       <li>Выбери зверька и сфотографируй раскраску (или раскрась прямо в телефоне).</li>
       <li>Зверёк сам прибежит на эту поляну!</li></ol>
       <div class="ph-note">Нужен интернет на компьютере и телефоне. Можно с нескольких телефонов сразу.</div>
-      <div class="ph-note">⏳ Каждый зверёк гуляет на поляне ${LIFETIME_H} часа, а потом убегает играть дальше.</div>`;
+      <div class="ph-note">⏳ Каждый зверёк гуляет на поляне ${LIFETIME_H} часа, а потом убегает играть дальше.</div>
+      <div class="ph-note">🧑‍🏫 Учителю: нажми на зверька <b>правой кнопкой мыши</b> (или подержи палец), чтобы попросить его уйти с поляны.</div>`;
     QR.draw(document.getElementById('qr'), link, 8);
     Relay.setStatus(Relay.status);
   }
@@ -2192,6 +2262,7 @@ function animate(work) {
       showScreen('home');
       return;
     }
+    if (!item.ok) { busy.classList.add('hidden'); showReject(item); return; }   // плохое фото — не пускаем на поляну
     App.animal = item.key; updateToggle();                // на случай, если программа сама узнала животное
     if (Phone.room) {
       try { await Phone.deliver(item); }
@@ -2208,6 +2279,49 @@ function animate(work) {
     }, Math.max(0, 800 - (performance.now() - t0)));
   }, 60));
 }
+
+/* ---- Окно «Фото не подошло» ---- */
+function showReject(item) {
+  const phone = !!Phone.room;
+  document.getElementById('rejTitle').textContent = { markers: '📷 Не получилось разглядеть лист',
+    match: '🤔 Не узнаю зверька', messy: '✏️ Вокруг зверька много каракулей' }[item.reason];
+  document.getElementById('rejText').innerHTML = {
+    markers: 'Нужно, чтобы в кадр попали <b>все 4 чёрных квадрата</b> по углам листа.',
+    match: 'Похоже, на фото не раскраска с этого сайта, или лист помят, снят сбоку или в полутьме.',
+    messy: 'Раскрась только самого зверька, а фон вокруг лучше оставить белым.' }[item.reason]
+    + '<br><br>Положи раскраску на стол и сфотографируй <b>ровно сверху</b>, при хорошем свете. '
+    + (phone ? 'А ещё можно <b>раскрасить зверька прямо в телефоне</b> 🎨' : 'А ещё можно <b>раскрасить зверька прямо на экране</b> 🎨');
+  document.getElementById('rejRetake').textContent = phone ? '📸 Переснять' : '📷 Попробовать ещё раз';
+  document.getElementById('rejDraw').textContent = phone ? '🎨 Раскрасить в телефоне' : '🎨 Раскрасить на экране';
+  document.getElementById('rejectPanel').classList.remove('hidden');
+}
+
+/* ---- Меню учителя: правый клик (или долгое нажатие) по зверьку → «Попросить уйти» ----
+   Если на поляну всё же попала каракуля, учитель может отправить её домой. Такой зверёк
+   не вернётся и после перезагрузки страницы. */
+const PetMenu = {
+  cr: null,
+  banned() { try { return JSON.parse(Store.get('zr-banned') || '[]'); } catch (e) { return []; } },
+  ban(id) { const b = this.banned(); b.push(id); Store.set('zr-banned', JSON.stringify(b.slice(-300))); },
+  open(cr, x, y) {
+    if (Phone.room || cr.leaving) return;
+    this.cr = cr;
+    cr.state = 'idle'; cr.wait = 6;                        // пока учитель решает, зверёк стоит
+    const m = document.getElementById('petMenu');
+    document.getElementById('petMenuTitle').textContent = `${cr.a.emoji} ${cr.a.label}`;
+    m.classList.remove('hidden');
+    m.style.left = Math.max(8, Math.min(window.innerWidth - m.offsetWidth - 8, x)) + 'px';
+    m.style.top = Math.max(8, Math.min(window.innerHeight - m.offsetHeight - 8, y)) + 'px';
+  },
+  close() { document.getElementById('petMenu').classList.add('hidden'); this.cr = null; },
+  sendAway() {
+    const cr = this.cr; this.close();
+    if (!cr) return;
+    Stage.leave(cr);
+    if (cr.id) this.ban(cr.id);
+    toast(`👋 ${cr.a.label} ушёл(ла) с поляны`);
+  },
+};
 
 function updateToggle() {
   document.querySelectorAll('#toggle .btn').forEach(b => b.classList.toggle('on', b.dataset.animal === App.animal));
@@ -2249,7 +2363,16 @@ function init() {
   document.getElementById('btnSendMore').onclick = () => { Sound.pip(); showScreen('home'); };
   document.querySelectorAll('[data-phone]').forEach(b => b.onclick = () => { Sound.pip(); openPhonePanel(); });
   document.getElementById('btnPhoneClose').onclick = () => { Sound.pip(); closePhonePanel(); };
-  window.addEventListener('pointerdown', () => Tip.hide());
+  window.addEventListener('pointerdown', e => { Tip.hide(); if (!e.target.closest('#petMenu')) PetMenu.close(); });
+  document.getElementById('petLeave').onclick = () => { Sound.pip(); PetMenu.sendAway(); };
+  document.getElementById('petCancel').onclick = () => { Sound.pip(); PetMenu.close(); };
+  const closeReject = () => document.getElementById('rejectPanel').classList.add('hidden');
+  document.getElementById('rejClose').onclick = () => { Sound.pip(); closeReject(); showScreen('home'); };
+  document.getElementById('rejDraw').onclick = () => { Sound.pip(); closeReject(); Draw.open(App.animal); };
+  document.getElementById('rejRetake').onclick = () => {
+    Sound.pip(); closeReject();
+    if (Phone.room) openUpload('snapInput'); else { showScreen('home'); Camera.open(); }
+  };
   document.getElementById('home').addEventListener('scroll', () => { if (performance.now() - Tip.at > 700) Tip.hide(); }, { passive: true });
   // Очистка — двойным нажатием, чтобы малыш не прогнал всех случайно
   let clearArmed = 0;
