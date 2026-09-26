@@ -93,6 +93,9 @@
   #sentPreview { width: min(320px, 80vw); height: auto; }
   .ph-room { text-align: center; font-size: 18px; }
   .ph-status { text-align: center; font-size: 18px; min-height: 1.4em; }
+  .qr-corner { position: absolute; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; align-items: center; gap: 4px;
+    background: #fff; border: none; border-radius: 16px; padding: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.2); font: inherit; font-size: 15px; font-weight: 800; color: var(--ink); cursor: pointer; }
+  .qr-corner canvas { width: 118px; height: 118px; image-rendering: pixelated; }
   @media (max-width: 520px) { .toggle .btn { font-size: 20px; padding: 8px 12px; min-height: 54px; } }
   #phonePageInput { font: inherit; font-size: 18px; padding: 12px; border-radius: 14px; border: 2px solid #c9d3e6; width: 100%; }
 
@@ -274,6 +277,9 @@
     </div>
   </div>
   <div id="stageHint">👆 Погладь зверька!</div>
+  <button id="qrCorner" class="qr-corner hidden" title="Добавить зверька с телефона">
+    <canvas id="qrSmall"></canvas><span>📱 Добавь зверька</span>
+  </button>
 </section>
 
 <div id="phonePanel" class="overlay hidden">
@@ -1986,6 +1992,7 @@ const Relay = {
       if (Stage.has(cr.id)) return;
       const onHome = document.getElementById('home').classList.contains('active');
       if (!quiet && onHome) { showScreen('stage'); Stage.open(); }   // на главном экране — сразу на поляну
+      if (!quiet && !document.getElementById('phonePanel').classList.contains('hidden')) closePhonePanel();   // большое окно с QR больше не мешает смотреть
       Stage.add(cr, { quiet });
       if (!quiet && !document.getElementById('stage').classList.contains('active')) toast(`${ANIMALS[meta.k].emoji} Новый зверёк прибежал на поляну!`);
       updateMeadowButton();
@@ -2014,6 +2021,18 @@ function blobToImage(blob) {
     im.onerror = e => { URL.revokeObjectURL(url); rej(e); };
     im.src = url;
   });
+}
+
+/* ---- Маленький QR в углу поляны: следующие дети сканируют, пока все смотрят ---- */
+function showQrCorner() {
+  const page = phonePageUrl();
+  if (!page || !Relay.room) return;
+  QR.draw(document.getElementById('qrSmall'), `${page}#room=${Relay.room}`, 4);
+  document.getElementById('qrCorner').classList.remove('hidden');
+}
+function closePhonePanel() {
+  document.getElementById('phonePanel').classList.add('hidden');
+  if (Relay.room && phonePageUrl()) showQrCorner();
 }
 
 /* ---- Окошко «📱 С телефона» с QR-кодом (на компьютере) ---- */
@@ -2167,7 +2186,8 @@ function init() {
   document.getElementById('btnMeadow').onclick = () => { Sound.pip(); showScreen('stage'); Stage.open(); };
   document.getElementById('btnSendMore').onclick = () => { Sound.pip(); showScreen('home'); };
   document.querySelectorAll('[data-phone]').forEach(b => b.onclick = () => { Sound.pip(); openPhonePanel(); });
-  document.getElementById('btnPhoneClose').onclick = () => { Sound.pip(); document.getElementById('phonePanel').classList.add('hidden'); };
+  document.getElementById('btnPhoneClose').onclick = () => { Sound.pip(); closePhonePanel(); };
+  document.getElementById('qrCorner').onclick = () => { Sound.pip(); openPhonePanel(); };
   // Очистка — двойным нажатием, чтобы малыш не прогнал всех случайно
   let clearArmed = 0;
   document.getElementById('btnClear2').onclick = () => {
@@ -2199,7 +2219,7 @@ function init() {
   // Первое касание где угодно «будит» звук (требование браузеров)
   window.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
   // Компьютер с поляной сразу начинает слушать свою комнату, если с неё уже присылали зверят
-  if (!phone && Store.get('zr-room')) Relay.listen();
+  if (!phone && Store.get('zr-room')) { Relay.listen(); showQrCorner(); }
 }
 
 init();
