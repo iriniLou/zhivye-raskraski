@@ -93,9 +93,15 @@
   #sentPreview { width: min(320px, 80vw); height: auto; }
   .ph-room { text-align: center; font-size: 18px; }
   .ph-status { text-align: center; font-size: 18px; min-height: 1.4em; }
-  .qr-corner { position: absolute; right: 12px; bottom: calc(12px + env(safe-area-inset-bottom)); display: flex; flex-direction: column; align-items: center; gap: 4px;
-    background: #fff; border: none; border-radius: 16px; padding: 8px; box-shadow: 0 6px 18px rgba(0,0,0,.2); font: inherit; font-size: 15px; font-weight: 800; color: var(--ink); cursor: pointer; }
-  .qr-corner canvas { width: 118px; height: 118px; image-rendering: pixelated; }
+  .life-note { font-size: 16px; font-weight: 600; opacity: .7; text-align: center; max-width: 1100px; }
+  .tip { position: fixed; z-index: 45; background: #fffbe8; color: var(--ink); border-radius: 18px; padding: 12px 16px;
+    font-size: 19px; font-weight: 800; line-height: 1.3; box-shadow: 0 8px 24px rgba(0,0,0,.25); pointer-events: none;
+    animation: tipIn .35s ease-out; }
+  .tip::before { content: ''; position: absolute; top: -10px; left: calc(var(--ax, 50%) - 10px);
+    border: 10px solid transparent; border-top: 0; border-bottom-color: #fffbe8; }
+  .tip.up::before { top: auto; bottom: -10px; border-bottom: 0; border-top: 10px solid #fffbe8; }
+  @keyframes tipIn { from { opacity: 0; transform: translateY(8px); } }
+  @media (prefers-reduced-motion: reduce) { .tip { animation: none; } }
   @media (max-width: 520px) { .toggle .btn { font-size: 20px; padding: 8px 12px; min-height: 54px; } }
   #phonePageInput { font: inherit; font-size: 18px; padding: 12px; border-radius: 14px; border: 2px solid #c9d3e6; width: 100%; }
 
@@ -219,6 +225,7 @@
       <button id="btnMeadow" class="btn big hidden pc-only" style="background:#bfe6ff">🌳 На поляну</button>
     </div>
   </div>
+  <div class="life-note">⏳ Каждый зверёк гуляет на поляне 3 часа, а потом убегает играть дальше</div>
 </section>
 
 <!-- ================= КАМЕРА ================= -->
@@ -277,11 +284,9 @@
     </div>
   </div>
   <div id="stageHint">👆 Погладь зверька!</div>
-  <button id="qrCorner" class="qr-corner hidden" title="Добавить зверька с телефона">
-    <canvas id="qrSmall"></canvas><span>📱 Добавь зверька</span>
-  </button>
 </section>
 
+<div id="tip" class="tip hidden" role="status"><span id="tipText"></span></div>
 <div id="phonePanel" class="overlay hidden">
   <div class="panel phone">
     <div id="phoneBody"></div>
@@ -294,7 +299,7 @@
   <div class="sent-box">
     <div class="sent-title">🎉 Зверёк побежал на большую поляну!</div>
     <canvas id="sentPreview" width="320" height="320"></canvas>
-    <div class="ph-note">Смотри на экран компьютера — он уже там.</div>
+    <div class="ph-note">Смотри на экран компьютера — он уже там.<br>⏳ Зверёк погуляет на поляне 3 часа, а потом убежит играть дальше.</div>
     <button id="btnSendMore" class="btn big b-go">➕ Отправить ещё зверька</button>
   </div>
 </section>
@@ -322,6 +327,8 @@ const TEX = { w: 720, h: 720 };                   // текстура рисун
 const IMG = 1254;                                 // размер исходных картинок
 const K = TEX.w / IMG;                            // перевод координат картинки → текстура
 const MAX_HERD = 35;                              // сколько зверят одновременно гуляет на поляне
+const LIFETIME_H = 3;                             // сколько часов зверёк гуляет, а потом убегает играть дальше
+const LIFETIME = LIFETIME_H * 3600 * 1000;        // (столько же живут картинки у почтальона ntfy.sh)
 
 // Чёрные квадраты-метки 30×30 мм, отступ 8 мм от края. Центры меток — опорные точки для камеры.
 const MARK = { size: 30, margin: 8 };
@@ -937,7 +944,9 @@ const Stage = {
   /* ---- Зверята на поляне ---- */
   has(id) { return this.herd.some(c => c.id === id); },
   add(cr, opts = {}) {
-    while (this.herd.length >= MAX_HERD) this.herd.shift();       // самый старый уходит домой
+    // места не больше MAX_HERD: самый старый зверёк убегает играть дальше
+    const staying = this.herd.filter(c => !c.leaving);
+    if (staying.length >= MAX_HERD) this.leave(staying[0]);
     const w = this.w || window.innerWidth;
     Object.assign(cr, {
       x: opts.quiet ? w * (0.08 + Math.random() * 0.84) : w * (0.3 + Math.random() * 0.4),
@@ -949,6 +958,8 @@ const Stage = {
       voiceIn: 8 + Math.random() * 20,
     });
     cr.flip = cr.dir;
+    cr.bornAt = opts.bornAt || Date.now();
+    cr.leaving = false;
     this.herd.push(cr);
     if (!opts.quiet) {
       for (let i = 0; i < 18; i++) this.sparkles.push({ x: cr.x, y: this.yOf(cr.z) - 60, vx: (Math.random() - 0.5) * 320, vy: -Math.random() * 300 - 60, t: 0, c: ['#ffd84d', '#ff9ec7', '#8fd3ff', '#fff'][i % 4] });
@@ -957,6 +968,14 @@ const Stage = {
     }
   },
   remove(id) { this.herd = this.herd.filter(c => c.id !== id); },
+  // Зверёк погулял и убегает за край поляны «играть дальше»
+  leave(cr) {
+    if (cr.leaving) return;
+    cr.leaving = true;
+    cr.tx = cr.x < this.w / 2 ? -this.w * 0.25 : this.w * 1.25;
+    cr.tz = cr.z; cr.excite = 1.5;
+    if (cr.state !== 'turn') cr.state = 'walk';
+  },
   clear() { this.herd = []; this.hearts = []; this.sparkles = []; },
 
   open() {
@@ -1094,8 +1113,10 @@ const Stage = {
 
   update(dt) {
     for (const c of this.clouds) { c.x += c.v * dt; if (c.x > this.w + c.s * 1.5) c.x = -c.s * 1.6; }
-    const depthPx = this.h * 0.46;
+    const depthPx = this.h * 0.46, now = Date.now();
     for (const cr of this.herd) {
+      if (!cr.leaving && now - cr.bornAt > LIFETIME) { this.leave(cr); toast(`${cr.a.emoji} Зверёк нагулялся и убежал играть дальше — пока-пока!`); }
+      if (cr.leaving && (cr.x < -this.w * 0.2 || cr.x > this.w * 1.2)) { cr.gone = true; continue; }
       cr.appear = Math.min(1, cr.appear + dt * 2.2);
       cr.excite = Math.max(0, cr.excite - dt);
       if (cr.jumpT >= 0) { cr.jumpT += dt; if (cr.jumpT > 0.6) cr.jumpT = -1; }
@@ -1107,7 +1128,8 @@ const Stage = {
 
       if (cr.state === 'idle' || cr.state === 'sit') {
         cr.wait -= dt;
-        if (cr.wait <= 0) { cr.state = 'walk'; this.pickTarget(cr); }
+        if (cr.leaving) cr.state = 'walk';
+        else if (cr.wait <= 0) { cr.state = 'walk'; this.pickTarget(cr); }
       } else if (cr.state === 'turn') {
         // Разворот: зверёк «сплющивается» по X и отражается — выглядит как поворот
         cr.turnT += dt;
@@ -1119,7 +1141,7 @@ const Stage = {
         const dx = cr.tx - cr.x, dz = (cr.tz - cr.z) * depthPx, dist = Math.hypot(dx, dz);
         const s = this.scaleOf(cr, cr.z);
         if (Math.abs(dx) > 8 && Math.sign(dx) !== cr.dir && (cr.a.gait === 'walk' || cr.hopT === 0)) { cr.state = 'turn'; cr.turnT = 0; }
-        else if (dist < 6 && (cr.a.gait === 'walk' || cr.hopT === 0)) this.arrive(cr);
+        else if (dist < 6 && (cr.a.gait === 'walk' || cr.hopT === 0)) { if (cr.leaving) cr.gone = true; else this.arrive(cr); }
         else if (cr.a.gait === 'hop') {
           // Скачок: 0,3 с в воздухе, 0,15 с приземление; двигаемся только в воздухе
           const HOP = 0.45, AIR = 0.3;
@@ -1150,6 +1172,7 @@ const Stage = {
         else cr.voiceIn = 1 + Math.random() * 4;
       }
     }
+    if (this.herd.some(c => c.gone)) { this.herd = this.herd.filter(c => !c.gone); updateMeadowButton(); }
     for (const hh of this.hearts) { hh.t += dt; hh.x += hh.vx * dt; hh.y -= 70 * dt; }
     this.hearts = this.hearts.filter(hh => hh.t < 1.6);
     for (const s of this.sparkles) { s.t += dt; s.x += s.vx * dt; s.y += s.vy * dt; s.vy += 500 * dt; }
@@ -1348,6 +1371,7 @@ const Stage = {
     Sound.pip();
     const tz = this.zOf(py);
     for (const cr of this.herd) {
+      if (cr.leaving) continue;
       cr.tx = Math.max(20, Math.min(this.w - 20, px + (Math.random() - 0.5) * this.w * 0.25));
       cr.tz = Math.max(0, Math.min(1, tz + (Math.random() - 0.5) * 0.25));
       cr.excite = 1.5;
@@ -1948,10 +1972,14 @@ const Relay = {
   topic(room) { return 'zhivye-raskraski-' + room; },
 
   // Компьютер: начать слушать свою комнату
+  // Своя комната у каждого браузера: случайные 10 знаков (≈10^15 вариантов), поэтому классы,
+  // открывшие страницу одновременно, никогда не попадут на чужую поляну. Комната «стареет» вместе
+  // со зверятами: через LIFETIME_H часов (или после 🧹) создаётся новая — поляна снова пустая.
   listen() {
     if (this.es || !window.EventSource) return;
     this.room = Store.get('zr-room');
-    if (!this.room) { this.room = randomId(10); Store.set('zr-room', this.room); }
+    const age = Date.now() - +(Store.get('zr-room-t') || 0);
+    if (!this.room || age > LIFETIME) { this.room = randomId(10); Store.set('zr-room', this.room); Store.set('zr-room-t', String(Date.now())); }
     this.clearedAt = +(Store.get('zr-cleared') || 0);
     this.setStatus('connecting');
     // since=3h — вернуть зверят, присланных за последние 3 часа (пока живут картинки)
@@ -1963,6 +1991,7 @@ const Relay = {
       if (m.event !== 'message' || !m.attachment || this.seen.has(m.id)) return;
       this.seen.add(m.id);
       if (m.time * 1000 < this.clearedAt) return;                 // после 🧹 старых не возвращаем
+      if (Date.now() - m.time * 1000 > LIFETIME) return;          // этот зверёк уже убежал играть дальше
       const quiet = Date.now() / 1000 - m.time > 20;              // старые — тихо, без фейерверка
       this.receive(m, quiet);
     };
@@ -1992,14 +2021,22 @@ const Relay = {
       if (Stage.has(cr.id)) return;
       const onHome = document.getElementById('home').classList.contains('active');
       if (!quiet && onHome) { showScreen('stage'); Stage.open(); }   // на главном экране — сразу на поляну
-      if (!quiet && !document.getElementById('phonePanel').classList.contains('hidden')) closePhonePanel();   // большое окно с QR больше не мешает смотреть
-      Stage.add(cr, { quiet });
+      if (!quiet) closePhonePanel();                             // большое окно с QR больше не мешает смотреть
+      Stage.add(cr, { quiet, bornAt: m.time * 1000 });
       if (!quiet && !document.getElementById('stage').classList.contains('active')) toast(`${ANIMALS[meta.k].emoji} Новый зверёк прибежал на поляну!`);
       updateMeadowButton();
     } catch (e) { console.warn('Не получилось принять зверька', e); }
   },
 
   // Телефон: отправить зверька в комнату
+  // После 🧹: новая комната и новый QR — старые ссылки на телефонах больше не приведут на эту поляну
+  newRoom() {
+    if (this.es) { this.es.close(); this.es = null; }
+    Store.set('zr-room', ''); Store.set('zr-room-t', '0');
+    this.seen.clear();
+    this.listen();
+  },
+
   async send(room, item) {
     let q = 0.85, blob;
     for (;;) {
@@ -2023,17 +2060,38 @@ function blobToImage(blob) {
   });
 }
 
-/* ---- Маленький QR в углу поляны: следующие дети сканируют, пока все смотрят ---- */
-function showQrCorner() {
-  const page = phonePageUrl();
-  if (!page || !Relay.room) return;
-  QR.draw(document.getElementById('qrSmall'), `${page}#room=${Relay.room}`, 4);
-  document.getElementById('qrCorner').classList.remove('hidden');
-}
-function closePhonePanel() {
-  document.getElementById('phonePanel').classList.add('hidden');
-  if (Relay.room && phonePageUrl()) showQrCorner();
-}
+function closePhonePanel() { document.getElementById('phonePanel').classList.add('hidden'); }
+
+/* ---- Всплывающая подсказка-«облачко» у кнопки 📱 ----
+   Показывается сама один раз на главном экране и один раз на поляне, прячется через 9 с или по касанию. */
+const Tip = {
+  shown: {}, timer: 0, at: 0,
+  show(key, anchor, text) {
+    if (this.shown[key] || Phone.room || !anchor || !anchor.offsetParent) return;
+    this.shown[key] = true;
+    let r = anchor.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > window.innerHeight) {            // кнопка за краем экрана — прокручиваем к ней
+      anchor.scrollIntoView({ block: 'center' }); r = anchor.getBoundingClientRect();
+    }
+    const tip = document.getElementById('tip');
+    this.at = performance.now();
+    document.getElementById('tipText').textContent = text;
+    tip.classList.remove('hidden');
+    const w = Math.min(320, window.innerWidth - 24);
+    tip.style.width = w + 'px';
+    const cx = r.left + r.width / 2;
+    const left = Math.max(12, Math.min(window.innerWidth - w - 12, cx - w / 2));
+    tip.style.left = left + 'px';
+    // под кнопкой, а если места нет — над ней (стрелочка переворачивается)
+    const below = r.bottom + 14 + tip.offsetHeight < window.innerHeight;
+    tip.classList.toggle('up', !below);
+    tip.style.top = (below ? r.bottom + 14 : r.top - 14 - tip.offsetHeight) + 'px';
+    tip.style.setProperty('--ax', (cx - left) + 'px');            // стрелочка смотрит на кнопку
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.hide(), 9000);
+  },
+  hide() { document.getElementById('tip').classList.add('hidden'); },
+};
 
 /* ---- Окошко «📱 С телефона» с QR-кодом (на компьютере) ---- */
 function openPhonePanel() {
@@ -2059,7 +2117,8 @@ function openPhonePanel() {
       <ol><li>Наведи камеру телефона на QR-код и открой ссылку.</li>
       <li>Выбери зверька и сфотографируй раскраску (или раскрась прямо в телефоне).</li>
       <li>Зверёк сам прибежит на эту поляну!</li></ol>
-      <div class="ph-note">Нужен интернет на компьютере и телефоне. Можно с нескольких телефонов сразу.</div>`;
+      <div class="ph-note">Нужен интернет на компьютере и телефоне. Можно с нескольких телефонов сразу.</div>
+      <div class="ph-note">⏳ Каждый зверёк гуляет на поляне ${LIFETIME_H} часа, а потом убегает играть дальше.</div>`;
     QR.draw(document.getElementById('qr'), link, 8);
     Relay.setStatus(Relay.status);
   }
@@ -2105,6 +2164,9 @@ function showScreen(id) {
   if (id !== 'camera') Camera.close();
   if (id !== 'stage') Stage.stop();          // поляна «засыпает», но зверьки остаются
   if (id === 'home') updateMeadowButton();
+  Tip.hide();
+  if (id === 'stage') setTimeout(() => Tip.show('stage', document.querySelector('#stage [data-phone]'),
+    '📱 Нажми сюда — и зверят можно будет добавлять с телефонов по QR-коду!'), 700);
 }
 
 let toastTimer = 0;
@@ -2142,7 +2204,7 @@ function animate(work) {
       busy.classList.add('hidden');
       showScreen('stage');
       Stage.open();
-      cr.id = 'local-' + Date.now(); Stage.add(cr);
+      cr.id = 'local-' + Date.now(); Stage.add(cr, { bornAt: Date.now() });
     }, Math.max(0, 800 - (performance.now() - t0)));
   }, 60));
 }
@@ -2187,15 +2249,17 @@ function init() {
   document.getElementById('btnSendMore').onclick = () => { Sound.pip(); showScreen('home'); };
   document.querySelectorAll('[data-phone]').forEach(b => b.onclick = () => { Sound.pip(); openPhonePanel(); });
   document.getElementById('btnPhoneClose').onclick = () => { Sound.pip(); closePhonePanel(); };
-  document.getElementById('qrCorner').onclick = () => { Sound.pip(); openPhonePanel(); };
+  window.addEventListener('pointerdown', () => Tip.hide());
+  document.getElementById('home').addEventListener('scroll', () => { if (performance.now() - Tip.at > 700) Tip.hide(); }, { passive: true });
   // Очистка — двойным нажатием, чтобы малыш не прогнал всех случайно
   let clearArmed = 0;
   document.getElementById('btnClear2').onclick = () => {
     Sound.pip();
     if (performance.now() - clearArmed < 3000) {
-      clearArmed = 0; Stage.clear();
+      clearArmed = 0; Stage.clear(); updateMeadowButton();
       Relay.clearedAt = Date.now(); Store.set('zr-cleared', String(Relay.clearedAt));
-      toast('Поляна пустая — добавь новых зверят! 🌼');
+      if (Relay.es) { Relay.newRoom(); toast('Поляна пустая! Для новых зверят — новый QR-код в 📱'); }
+      else toast('Поляна пустая — добавь новых зверят! 🌼');
     } else { clearArmed = performance.now(); toast('Нажми 🧹 ещё раз, чтобы все зверята ушли домой'); }
   };
   document.getElementById('btnSound').onclick = e => {
@@ -2219,7 +2283,10 @@ function init() {
   // Первое касание где угодно «будит» звук (требование браузеров)
   window.addEventListener('pointerdown', () => Sound.unlock(), { once: true });
   // Компьютер с поляной сразу начинает слушать свою комнату, если с неё уже присылали зверят
-  if (!phone && Store.get('zr-room')) { Relay.listen(); showQrCorner(); }
+  if (!phone && Store.get('zr-room')) Relay.listen();
+  // Подсказка при первом открытии: зверят можно добавлять с телефона
+  if (!phone) App.ready.then(() => setTimeout(() => Tip.show('home', document.querySelector('#home [data-phone]'),
+    '📱 Нет камеры у компьютера? Нажми сюда — и фотографируй раскраски телефоном по QR-коду!'), 900));
 }
 
 init();
