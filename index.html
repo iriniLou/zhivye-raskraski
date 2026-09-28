@@ -100,6 +100,12 @@
   .vh { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
   label.btn { display: flex; align-items: center; justify-content: center; text-align: center; -webkit-user-select: none; user-select: none; }
   .inapp { background: #fff3c4; border-radius: 16px; padding: 12px 16px; font-size: 17px; font-weight: 600; max-width: 560px; line-height: 1.35; }
+  .code-btn { font-size: 20px; min-height: 56px; background: #fff; }
+  #codeInput { font: inherit; font-size: 28px; font-weight: 800; letter-spacing: 2px; text-align: center; padding: 12px; border-radius: 14px; border: 2px solid #c9d3e6; width: 100%; }
+  #codeInput::placeholder { font-size: 22px; font-weight: 600; opacity: .45; }
+  .code-err { color: #c0392b; min-height: 1.2em; font-weight: 700; opacity: 1; }
+  body:not(.phone-mode) .phone-only-block { display: none; }
+  .ph-code { text-align: center; font-size: 30px; font-weight: 800; letter-spacing: 3px; font-variant-numeric: tabular-nums; }
   .life-note { font-size: 16px; font-weight: 600; opacity: .7; text-align: center; max-width: 1100px; }
   .tip { position: fixed; z-index: 45; background: #fffbe8; color: var(--ink); border-radius: 18px; padding: 12px 16px;
     font-size: 19px; font-weight: 800; line-height: 1.3; box-shadow: 0 8px 24px rgba(0,0,0,.25); pointer-events: none;
@@ -234,6 +240,8 @@
       <button id="btnMeadow" class="btn big hidden pc-only" style="background:#bfe6ff">🌳 На поляну</button>
     </div>
   </div>
+  <button id="btnCode" class="btn pc-only code-btn">🔢 Ввести код комнаты</button>
+  <div id="phoneRoomNote" class="life-note phone-only-block"></div>
   <div class="life-note">⏳ Каждый зверёк гуляет на поляне 3 часа, а потом убегает играть дальше</div>
 </section>
 
@@ -295,6 +303,16 @@
 </section>
 
 <div id="tip" class="tip hidden" role="status"><span id="tipText"></span></div>
+<div id="codePanel" class="overlay hidden">
+  <div class="panel phone">
+    <div class="ph-title">🔢 Код комнаты</div>
+    <div class="ph-note">Введи код, который показан на большом экране в окне 📱 (10 букв и цифр).</div>
+    <input id="codeInput" type="text" inputmode="text" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="16" placeholder="ab3kx-9mfpq">
+    <div id="codeError" class="ph-note code-err"></div>
+    <button id="codeGo" class="btn big b-go">Подключиться</button>
+    <button id="codeClose" class="btn big b-soft" style="background:#eef3ff">Отмена</button>
+  </div>
+</div>
 <div id="rejectPanel" class="overlay hidden">
   <div class="panel phone">
     <div class="ph-title" id="rejTitle"></div>
@@ -612,7 +630,8 @@ function applyH(H, x, y) {
    3) «заклеиваем» мелкие дырки от бликов и находим связные тёмные пятна;
    4) из квадратных плотных пятен перебираем четвёрки и берём ту, что похожа на углы листа:
       выпуклый четырёхугольник, квадраты одного размера, размер квадрата соразмерен листу.
-      Где эти квадраты в кадре — неважно. Ориентацию листа (0°/90°/180°/270°) определяем
+      Где эти квадраты в кадре — неважно. Если один квадрат закрыт (палец, тень, край кадра),
+      достраиваем его по трём остальным. Ориентацию листа (0°/90°/180°/270°) определяем
       позже по самому рисунку (см. photoToItem). */
 function findMarkers(source, R) {
   const k = Math.min(1, 480 / Math.max(R.w, R.h));
@@ -682,7 +701,38 @@ function findMarkers(source, R) {
     const score = quadArea * (1 - Math.abs(Math.log(asp / 1.53)) * 0.3);
     if (score > bestScore) { bestScore = score; best = q; }
   }
-  if (!best || bestScore < w * h * 0.03) return null;
+  // Не нашлось всех четырёх (палец, тень или край кадра закрыли один угол)?
+  // Берём три квадрата, образующих угол листа, и достраиваем четвёртый: D = A + C − B.
+  if (!best || bestScore < w * h * 0.03) {
+    best = null; bestScore = 0;
+    for (let i = 0; i < m; i++) for (let j = i + 1; j < m; j++) for (let l = j + 1; l < m; l++) {
+      const tri = [cand[i], cand[j], cand[l]];
+      const areas = tri.map(p => p.area), aMax = Math.max(...areas), aMin = Math.min(...areas);
+      if (aMax > 3 * aMin) continue;
+      for (let b = 0; b < 3; b++) {
+        const B = tri[b], A = tri[(b + 1) % 3], C = tri[(b + 2) % 3];
+        const ax = A.cx - B.cx, ay = A.cy - B.cy, cx = C.cx - B.cx, cy = C.cy - B.cy;
+        const la = Math.hypot(ax, ay), lc = Math.hypot(cx, cy);
+        const cos = (ax * cx + ay * cy) / (la * lc);
+        if (Math.abs(cos) > 0.35) continue;                              // угол у B — почти прямой
+        const asp = Math.max(la, lc) / Math.min(la, lc);
+        if (asp > 2.6) continue;
+        const quadArea = Math.abs(ax * cy - ay * cx);
+        const ratio = Math.sqrt((aMax + aMin) / 2) / Math.sqrt(quadArea);
+        if (ratio < 0.06 || ratio > 0.32) continue;
+        const score = quadArea * 0.9 * (1 - Math.abs(Math.log(asp / 1.53)) * 0.3);
+        if (score > bestScore) {
+          bestScore = score;
+          const D = { cx: A.cx + C.cx - B.cx, cy: A.cy + C.cy - B.cy, area: (aMax + aMin) / 2 };
+          const q = [A, B, C, D];
+          const mx = (A.cx + B.cx + C.cx + D.cx) / 4, my = (A.cy + B.cy + C.cy + D.cy) / 4;
+          q.sort((p1, p2) => Math.atan2(p1.cy - my, p1.cx - mx) - Math.atan2(p2.cy - my, p2.cx - mx));
+          best = q;
+        }
+      }
+    }
+    if (!best || bestScore < w * h * 0.03) return null;
+  }
   // по кругу от «левого верхнего» → порядок ЛВ, ПВ, ЛН, ПН (как MARK_CENTERS)
   let s0 = 0;
   for (let s = 1; s < 4; s++) if (best[s].cx + best[s].cy < best[s0].cx + best[s0].cy) s0 = s;
@@ -969,17 +1019,38 @@ function photoLuma(src) {
   for (let i = 0; i < d.length; i++) { d[i] = (s[i * 4] * 77 + s[i * 4 + 1] * 150 + s[i * 4 + 2] * 29) >> 8; hist[d[i]]++; }
   let acc = 0, paper = 255;
   for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= d.length * 0.9) { paper = v; break; } }
-  const thr = Math.max(40, paper * 0.55), dk = new Uint8Array(d.length);
-  for (let i = 0; i < d.length; i++) dk[i] = d[i] < thr ? 1 : 0;
+  const dk = contrastLines(d, w, h, 2);                             // линии — по контрасту с окрестностью
   // допуск ≈1,5–2 мм: лист бывает изогнут, и линии на фото чуть «уезжают» от шаблона
   const r = Math.max(1, Math.round(Math.min(w, h) / 220));
   return { w, h, k, dark: morph(dk, w, h, r, true) };
 }
 
+// «Максимум по окрестности» для яркости (серый аналог дилатации) — светлый фон вокруг каждой точки
+function maxFilter(src, w, h, r) {
+  const tmp = new Uint8Array(w * h), out = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let m = 0; for (let dx = -r; dx <= r; dx++) { const xx = x + dx; if (xx >= 0 && xx < w) { const v = src[y * w + xx]; if (v > m) m = v; } }
+    tmp[y * w + x] = m;
+  }
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    let m = 0; for (let dy = -r; dy <= r; dy++) { const yy = y + dy; if (yy >= 0 && yy < h) { const v = tmp[yy * w + x]; if (v > m) m = v; } }
+    out[y * w + x] = m;
+  }
+  return out;
+}
+// Линия = точка заметно темнее своей окрестности (или просто тёмная). Так находятся и серые,
+// бледно напечатанные линии, и линии поверх раскраски, и линии в тени.
+function contrastLines(L, w, h, r) {
+  const mx = maxFilter(L, w, h, r), out = new Uint8Array(w * h);
+  for (let i = 0; i < out.length; i++) out[i] = (L[i] < 110 || (mx[i] > 60 && L[i] < mx[i] * 0.78)) ? 1 : 0;
+  return out;
+}
+
 function outlineMatch(raw, key) {
   const d = ctx2d(raw).getImageData(0, 0, TEX.w, TEX.h).data, N = TEX.w * TEX.h;
-  const dark = new Uint8Array(N);
-  for (let i = 0; i < N; i++) dark[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) < 330 ? 1 : 0;
+  const L = new Uint8Array(N);
+  for (let i = 0; i < N; i++) L[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3;
+  const dark = contrastLines(L, TEX.w, TEX.h, 5);
   const near = morph(dark, TEX.w, TEX.h, 9, true);               // «рядом с тёмным» — допуск ≈2 мм
   const line = ANIMALS[key].dark;
   let on = 0, hit = 0;
@@ -2286,6 +2357,17 @@ function blobToImage(blob) {
   });
 }
 
+// Код комнаты группами по 5 знаков — так его легче прочитать с экрана и набрать
+function prettyRoom(r) { return r.length > 6 ? r.slice(0, 5) + '-' + r.slice(5) : r; }
+// Разбор введённого кода: регистр, дефисы и пробелы не важны; русские буквы-двойники → латинские
+function parseRoom(text) {
+  const twins = { 'а': 'a', 'в': 'b', 'е': 'e', 'к': 'k', 'м': 'm', 'н': 'h', 'о': 'o', 'р': 'p', 'с': 'c', 'т': 't', 'у': 'y', 'х': 'x' };
+  const s = text.toLowerCase().replace(/[а-яё]/g, ch => twins[ch] || ch).replace(/[^a-z0-9]/g, '');
+  if (/[01lo]/.test(s)) return { error: 'В коде нет букв O и L и цифр 0 и 1 — проверь похожие знаки' };
+  if (!/^[a-z0-9]{10}$/.test(s)) return { error: 'В коде должно быть 10 букв и цифр' };
+  return { room: s };
+}
+
 function closePhonePanel() { document.getElementById('phonePanel').classList.add('hidden'); }
 
 /* ---- Всплывающая подсказка-«облачко» у кнопки 📱 ----
@@ -2336,9 +2418,11 @@ function openPhonePanel() {
     };
   } else {
     const link = `${page}#room=${Relay.room}`;
+    const shortPage = page.replace(/^https?:\/\//, '').replace(/\/$/, '');
     body.innerHTML = `<div class="ph-title">📱 Зверята с телефона</div>
       <canvas id="qr"></canvas>
-      <div class="ph-room">Комната: <b>${Relay.room}</b></div>
+      <div class="ph-room">Не сканируется? Открой на телефоне <b>${shortPage}</b>,<br>нажми «🔢 Ввести код комнаты» и введи:</div>
+      <div class="ph-code">${prettyRoom(Relay.room)}</div>
       <div id="relayStatus" class="ph-status"></div>
       <ol><li>Наведи камеру телефона на QR-код и открой ссылку.</li>
       <li>Выбери зверька и сфотографируй раскраску (или раскрась прямо в телефоне).</li>
@@ -2363,6 +2447,7 @@ const Phone = {
     this.room = m[1];
     document.body.classList.add('phone-mode');
     document.getElementById('phoneTitle').textContent = '📱 Отправь зверька на большую поляну!';
+    document.getElementById('phoneRoomNote').textContent = `Комната: ${prettyRoom(this.room)}`;
     return true;
   },
   // Вместо показа на своей поляне — отправляем на компьютер
@@ -2526,6 +2611,22 @@ function init() {
   document.querySelectorAll('[data-phone]').forEach(b => b.onclick = () => { Sound.pip(); openPhonePanel(); });
   document.getElementById('btnPhoneClose').onclick = () => { Sound.pip(); closePhonePanel(); };
   window.addEventListener('pointerdown', e => { Tip.hide(); if (!e.target.closest('#petMenu')) PetMenu.close(); });
+  // Ручной ввод кода комнаты (телефон открыл сайт без QR)
+  const codePanel = document.getElementById('codePanel'), codeInput = document.getElementById('codeInput');
+  document.getElementById('btnCode').onclick = () => {
+    Sound.pip(); document.getElementById('codeError').textContent = ''; codeInput.value = '';
+    codePanel.classList.remove('hidden'); setTimeout(() => codeInput.focus(), 50);
+  };
+  document.getElementById('codeClose').onclick = () => { Sound.pip(); codePanel.classList.add('hidden'); };
+  const goCode = () => {
+    const r = parseRoom(codeInput.value);
+    if (r.error) { document.getElementById('codeError').textContent = r.error; return; }
+    Sound.pip();
+    location.hash = 'room=' + r.room;
+    location.reload();                                        // открываемся заново уже «пультом» этой комнаты
+  };
+  document.getElementById('codeGo').onclick = goCode;
+  codeInput.addEventListener('keydown', e => { if (e.key === 'Enter') goCode(); });
   document.getElementById('petLeave').onclick = () => { Sound.pip(); PetMenu.sendAway(); };
   document.getElementById('petCancel').onclick = () => { Sound.pip(); PetMenu.close(); };
   const closeReject = () => document.getElementById('rejectPanel').classList.add('hidden');
